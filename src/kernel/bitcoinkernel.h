@@ -1288,6 +1288,18 @@ BITCOINKERNEL_API void btck_chainstate_manager_options_update_chainstate_db_in_m
     int chainstate_db_in_memory) BITCOINKERNEL_ARG_NONNULL(1);
 
 /**
+ * @brief Sets pruning in the options. Blocks are then deleted by
+ * @ref btck_block_manager_prune_up_to_height. A pruned data directory only
+ * opens with pruning set.
+ *
+ * @param[in] chainstate_manager_options Non-null, created by @ref btck_chainstate_manager_options_create.
+ * @param[in] prune                      Set pruning.
+ */
+BITCOINKERNEL_API void btck_chainstate_manager_options_update_prune(
+    btck_ChainstateManagerOptions* chainstate_manager_options,
+    int prune) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
  * Destroy the chainstate manager options.
  */
 BITCOINKERNEL_API void btck_chainstate_manager_options_destroy(btck_ChainstateManagerOptions* chainstate_manager_options);
@@ -1412,6 +1424,57 @@ BITCOINKERNEL_API const btck_BlockTreeEntry* btck_chainstate_manager_get_block_t
  * Destroy the chainstate manager.
  */
 BITCOINKERNEL_API void btck_chainstate_manager_destroy(btck_ChainstateManager* chainstate_manager);
+
+///@}
+
+/** @name BlockManager
+ * Functions for working with block managers.
+ */
+///@{
+
+/**
+ * @brief Delete the blocks and spent outputs up to and including a height,
+ * except the 288 most recent. Files are deleted whole and prune locks apply, so
+ * some blocks at or below the height may be kept. Heights below 1 delete
+ * nothing. If writing fails, the selected blocks can no longer be read and
+ * their files are deleted the next time the chainstate is written, as it is
+ * when the chainstate manager is destroyed.
+ *
+ * @param[in] block_manager Non-null.
+ * @param[in] height        The highest height to delete.
+ * @return                  0 on success, non-zero if pruning is not enabled or
+ *                          writing to disk failed.
+ */
+BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_block_manager_prune_up_to_height(
+    btck_BlockManager* block_manager,
+    int32_t height) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Keep the blocks and spent outputs at and above a height from being
+ * pruned until the lock is updated or deleted. Locks are not saved across
+ * restarts.
+ *
+ * @param[in] block_manager Non-null.
+ * @param[in] name          Identifies the lock.
+ * @param[in] name_len      Length of name.
+ * @param[in] height        The lowest height to keep. Must not be negative.
+ */
+BITCOINKERNEL_API void btck_block_manager_update_prune_lock(
+    btck_BlockManager* block_manager,
+    const char* name, size_t name_len,
+    int32_t height) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Delete a lock set with @ref btck_block_manager_update_prune_lock.
+ *
+ * @param[in] block_manager Non-null.
+ * @param[in] name          Identifies the lock.
+ * @param[in] name_len      Length of name.
+ * @return                  1 if the lock existed, 0 otherwise.
+ */
+BITCOINKERNEL_API int btck_block_manager_delete_prune_lock(
+    btck_BlockManager* block_manager,
+    const char* name, size_t name_len) BITCOINKERNEL_ARG_NONNULL(1);
 
 ///@}
 
@@ -2183,6 +2246,16 @@ BITCOINKERNEL_API void btck_block_header_destroy(btck_BlockHeader* header);
  *                      valid [0, 4294967295] range.
  */
 BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_set_mock_time(int64_t timestamp);
+
+/**
+ * @brief Use small block files, so a test chain can be pruned.
+ *
+ * @param[in] chainstate_manager_options Non-null, created by @ref btck_chainstate_manager_options_create.
+ * @param[in] fast_prune                 Use small block files.
+ */
+BITCOINKERNEL_API void btck_chainstate_manager_options_update_fast_prune(
+    btck_ChainstateManagerOptions* chainstate_manager_options,
+    int fast_prune) BITCOINKERNEL_ARG_NONNULL(1);
 
 ///@}
 
