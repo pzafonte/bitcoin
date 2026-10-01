@@ -914,6 +914,10 @@ BOOST_AUTO_TEST_CASE(btck_chainman_tests)
     BOOST_CHECK(!chainman_opts.SetDatabaseCacheBytes(4_MiB - 1));
     if constexpr (sizeof(void*) == 4) BOOST_CHECK(!chainman_opts.SetDatabaseCacheBytes(2_GiB));
     BOOST_CHECK(chainman_opts.SetDatabaseCacheBytes(4_MiB));
+    BOOST_CHECK(!chainman_opts.SetPruneTargetBytes(550_MiB - 1));
+    BOOST_CHECK(chainman_opts.SetPruneTargetBytes(0));
+    BOOST_CHECK(chainman_opts.SetPruneTargetBytes(550_MiB));
+    chainman_opts.UpdatePruneLock("startup", 1);
     BOOST_CHECK(!chainman_opts.SetWipeDbs(/*wipe_block_tree=*/true, /*wipe_chainstate=*/false));
     BOOST_CHECK(chainman_opts.SetWipeDbs(/*wipe_block_tree=*/true, /*wipe_chainstate=*/true));
     BOOST_CHECK(chainman_opts.SetWipeDbs(/*wipe_block_tree=*/false, /*wipe_chainstate=*/true));
@@ -921,6 +925,7 @@ BOOST_AUTO_TEST_CASE(btck_chainman_tests)
     ChainMan chainman{context, chainman_opts};
     auto blockman{chainman.GetBlockManager()};
     BOOST_CHECK(!blockman.PruneUpToHeight(1));
+    BOOST_CHECK(blockman.DeletePruneLock("startup"));
 }
 
 std::unique_ptr<ChainMan> create_chainman(TestDirectory& test_directory,
@@ -1284,6 +1289,41 @@ BOOST_AUTO_TEST_CASE(btck_chainman_prune_tests)
     const auto chain{chainman->GetChain()};
     BOOST_CHECK_EQUAL(chain.Height(), tip_height);
     BOOST_CHECK(!chainman->GetBlockManager().ReadBlock(chain.GetByHeight(1)));
+}
+
+BOOST_AUTO_TEST_CASE(btck_chainman_prune_lock_option_tests)
+{
+    auto test_directory{TestDirectory{"prune_lock_option_test_bitcoin_kernel"}};
+    auto notifications{std::make_shared<TestKernelNotifications>()};
+    auto context{create_context(notifications, ChainType::REGTEST)};
+
+    ChainstateManagerOptions chainman_opts{context, PathToString(test_directory.m_directory), PathToString(test_directory.m_directory / "blocks")};
+    chainman_opts.UpdatePrune(true);
+    chainman_opts.UpdateFastPrune(true);
+    chainman_opts.UpdatePruneLock("startup", 1);
+    ChainMan chainman{context, chainman_opts};
+
+    for (const auto& raw_block : REGTEST_BLOCK_DATA) {
+        BOOST_REQUIRE(chainman.ProcessBlock(Block{hex_string_to_byte_vec(raw_block)}, nullptr));
+    }
+    const auto chain{chainman.GetChain()};
+    Block last_block{hex_string_to_byte_vec(REGTEST_BLOCK_DATA.back())};
+    auto prev_hash{last_block.GetHash().ToBytes()};
+    auto time{last_block.GetHeader().Timestamp()};
+    for (int i{0}; i < 300; ++i) {
+        Block block{create_regtest_block(prev_hash, chain.Height() + 1, ++time)};
+        BOOST_REQUIRE(chainman.ProcessBlock(block, nullptr));
+        prev_hash = block.GetHash().ToBytes();
+    }
+
+    const auto blockman{chainman.GetBlockManager()};
+    const int32_t prune_height{chain.Height() - PRUNE_KEEP_BLOCKS};
+    BOOST_CHECK(blockman.PruneUpToHeight(prune_height));
+    BOOST_CHECK(blockman.ReadBlock(chain.GetByHeight(1)));
+
+    BOOST_CHECK(blockman.DeletePruneLock("startup"));
+    BOOST_CHECK(blockman.PruneUpToHeight(prune_height));
+    BOOST_CHECK(!blockman.ReadBlock(chain.GetByHeight(1)));
 }
 
 BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
