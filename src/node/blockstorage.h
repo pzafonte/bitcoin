@@ -43,8 +43,7 @@
 
 class BlockValidationState;
 class CBlockUndo;
-class Chainstate;
-class ChainstateManager;
+
 namespace Consensus {
 struct Params;
 }
@@ -191,9 +190,6 @@ enum class ReadRawError {
  */
 class BlockManager
 {
-    friend Chainstate;
-    friend ChainstateManager;
-
 private:
     const CChainParams& GetParams() const { return m_opts.chainparams; }
     const Consensus::Params& GetConsensus() const { return m_opts.chainparams.GetConsensus(); }
@@ -250,12 +246,6 @@ private:
         return std::max(normal.file_num, assumed.file_num);
     }
 
-    /** Global flag to indicate we should check to see if there are
-     *  block/undo files that should be deleted.  Set on startup
-     *  or if we allocate more file space when we're in prune mode
-     */
-    bool m_check_for_pruning = false;
-
     const bool m_prune_mode;
 
     const Obfuscation m_obfuscation;
@@ -278,9 +268,6 @@ private:
 protected:
     std::vector<CBlockFileInfo> m_blockfile_info;
 
-    /** Dirty block index entries. */
-    std::set<CBlockIndex*> m_dirty_blockindex;
-
     /** Dirty block file entries. */
     std::set<int> m_dirty_fileinfo;
 
@@ -302,6 +289,9 @@ public:
     std::atomic_bool m_blockfiles_indexed{true};
 
     BlockMap m_block_index GUARDED_BY(cs_main);
+
+    /** Dirty block index entries. */
+    std::set<CBlockIndex*> m_dirty_blockindex;
 
     /**
      * The height of the base block of an assumeutxo snapshot, if one is in use.
@@ -405,6 +395,8 @@ public:
     /** Whether running in -prune mode. */
     [[nodiscard]] bool IsPruneMode() const { return m_prune_mode; }
 
+    [[nodiscard]] const fs::path& GetBlocksDir() const { return m_opts.blocks_dir; }
+
     /** Attempt to stay below this number of bytes of block files. */
     [[nodiscard]] uint64_t GetPruneTarget() const { return m_opts.prune_target; }
     static constexpr auto PRUNE_TARGET_MANUAL{std::numeric_limits<uint64_t>::max()};
@@ -450,6 +442,12 @@ public:
 
     /** True if any block files have ever been pruned. */
     bool m_have_pruned = false;
+
+    /** Global flag to indicate we should check to see if there are
+     *  block/undo files that should be deleted.  Set on startup
+     *  or if we allocate more file space when we're in prune mode
+     */
+    bool m_check_for_pruning = false;
 
     //! Check whether the block associated with this index entry is pruned or not.
     bool IsBlockPruned(const CBlockIndex& block) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
