@@ -1285,6 +1285,21 @@ public:
     {
         btck_chainstate_manager_options_update_chainstate_db_in_memory(get(), chainstate_db_in_memory);
     }
+
+    void UpdatePrune(bool prune)
+    {
+        btck_chainstate_manager_options_update_prune(get(), prune);
+    }
+
+    bool SetPruneTargetBytes(uint64_t prune_target_bytes)
+    {
+        return btck_chainstate_manager_options_set_prune_target_bytes(get(), prune_target_bytes) == 0;
+    }
+
+    void UpdatePruneLock(std::string_view name, int32_t height)
+    {
+        btck_chainstate_manager_options_update_prune_lock(get(), name.data(), name.length(), height);
+    }
 };
 
 class ChainView : public View<btck_Chain>
@@ -1416,6 +1431,43 @@ public:
     MAKE_RANGE_METHOD(TxsSpentOutputs, BlockSpentOutputs, &BlockSpentOutputs::Count, &BlockSpentOutputs::GetTxSpentOutputs, *this)
 };
 
+class BlockManagerView
+{
+    btck_BlockManager* m_ptr;
+
+public:
+    explicit BlockManagerView(btck_BlockManager* ptr) : m_ptr{check(ptr)} {}
+
+    btck_BlockManager* get() const { return m_ptr; }
+
+    std::optional<Block> ReadBlock(const BlockTreeEntry& entry) const
+    {
+        auto block{btck_block_read(get(), entry.get())};
+        if (!block) return std::nullopt;
+        return block;
+    }
+
+    BlockSpentOutputs ReadBlockSpentOutputs(const BlockTreeEntry& entry) const
+    {
+        return btck_block_spent_outputs_read(get(), entry.get());
+    }
+
+    bool PruneUpToHeight(int32_t height) const
+    {
+        return btck_block_manager_prune_up_to_height(get(), height) == 0;
+    }
+
+    void UpdatePruneLock(std::string_view name, int32_t height) const
+    {
+        btck_block_manager_update_prune_lock(get(), name.data(), name.length(), height);
+    }
+
+    bool DeletePruneLock(std::string_view name) const
+    {
+        return btck_block_manager_delete_prune_lock(get(), name.data(), name.length()) == 1;
+    }
+};
+
 class ChainMan : UniqueHandle<btck_ChainstateManager, btck_chainstate_manager_destroy>
 {
 public:
@@ -1457,6 +1509,11 @@ public:
         return ChainView{btck_chainstate_manager_get_active_chain(get())};
     }
 
+    BlockManagerView GetBlockManager()
+    {
+        return BlockManagerView{btck_chainstate_manager_get_block_manager(get())};
+    }
+
     std::optional<BlockTreeEntry> GetBlockTreeEntry(const BlockHash& block_hash) const
     {
         auto entry{btck_chainstate_manager_get_block_tree_entry_by_hash(get(), block_hash.get())};
@@ -1464,21 +1521,16 @@ public:
         return entry;
     }
 
+    std::optional<BlockTreeEntry> GetFirstAvailableEntry() const
+    {
+        auto entry{btck_chainstate_manager_get_first_available_entry(get())};
+        if (!entry) return std::nullopt;
+        return entry;
+    }
+
     BlockTreeEntry GetBestEntry() const
     {
         return btck_chainstate_manager_get_best_entry(get());
-    }
-
-    std::optional<Block> ReadBlock(const BlockTreeEntry& entry) const
-    {
-        auto block{btck_block_read(get(), entry.get())};
-        if (!block) return std::nullopt;
-        return block;
-    }
-
-    BlockSpentOutputs ReadBlockSpentOutputs(const BlockTreeEntry& entry) const
-    {
-        return btck_block_spent_outputs_read(get(), entry.get());
     }
 };
 

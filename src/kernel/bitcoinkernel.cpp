@@ -51,6 +51,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -458,6 +459,8 @@ struct ChainstateManagerOptions {
     std::shared_ptr<const Context> m_context;
     node::ChainstateLoadOptions m_chainstate_load_options GUARDED_BY(m_mutex);
     uint64_t m_db_cache_bytes GUARDED_BY(m_mutex){DEFAULT_KERNEL_CACHE};
+    uint64_t m_prune_target_bytes GUARDED_BY(m_mutex){0};
+    std::unordered_map<std::string, node::PruneLockInfo> m_prune_locks GUARDED_BY(m_mutex);
 
     ChainstateManagerOptions(const std::shared_ptr<const Context>& context, const fs::path& data_dir, const fs::path& blocks_dir)
         : m_chainman_options{ChainstateManager::Options{
@@ -479,11 +482,12 @@ struct ChainstateManagerOptions {
 };
 
 struct ChainMan {
+    std::unique_ptr<node::BlockManager> m_blockman;
     std::unique_ptr<ChainstateManager> m_chainman;
     std::shared_ptr<const Context> m_context;
 
-    ChainMan(std::unique_ptr<ChainstateManager> chainman, std::shared_ptr<const Context> context)
-        : m_chainman(std::move(chainman)), m_context(std::move(context)) {}
+    ChainMan(std::unique_ptr<node::BlockManager> blockman, std::unique_ptr<ChainstateManager> chainman, std::shared_ptr<const Context> context)
+        : m_blockman(std::move(blockman)), m_chainman(std::move(chainman)), m_context(std::move(context)) {}
 };
 
 } // namespace
@@ -497,6 +501,8 @@ struct btck_Context : Handle<btck_Context, std::shared_ptr<const Context>> {};
 struct btck_ChainParameters : Handle<btck_ChainParameters, CChainParams> {};
 struct btck_ChainstateManagerOptions : Handle<btck_ChainstateManagerOptions, ChainstateManagerOptions> {};
 struct btck_ChainstateManager : Handle<btck_ChainstateManager, ChainMan> {};
+// Wraps the ChainMan that owns the block manager, which also gives access to the chainstate
+struct btck_BlockManager : Handle<btck_BlockManager, ChainMan> {};
 struct btck_Chain : Handle<btck_Chain, CChain> {};
 struct btck_BlockSpentOutputs : Handle<btck_BlockSpentOutputs, std::shared_ptr<CBlockUndo>> {};
 struct btck_TransactionSpentOutputs : Handle<btck_TransactionSpentOutputs, CTxUndo> {};
@@ -1120,14 +1126,63 @@ void btck_chainstate_manager_options_update_chainstate_db_in_memory(
     opts.m_chainstate_load_options.coins_db_in_memory = chainstate_db_in_memory == 1;
 }
 
+void btck_chainstate_manager_options_update_prune(
+    btck_ChainstateManagerOptions* chainman_opts,
+    int prune)
+{
+    auto& opts{btck_ChainstateManagerOptions::get(chainman_opts)};
+    LOCK(opts.m_mutex);
+    opts.m_blockman_options.prune_target = prune == 1 ? node::BlockManager::PRUNE_TARGET_MANUAL : 0;
+}
+
+int btck_chainstate_manager_options_set_prune_target_bytes(btck_ChainstateManagerOptions* chainman_opts, uint64_t prune_target_bytes)
+{
+    if (prune_target_bytes != 0 && prune_target_bytes < MIN_DISK_SPACE_FOR_BLOCK_FILES) {
+        LogError("Failed to set prune target: size is below the supported minimum.");
+        return -1;
+    }
+    auto& opts{btck_ChainstateManagerOptions::get(chainman_opts)};
+    LOCK(opts.m_mutex);
+    opts.m_prune_target_bytes = prune_target_bytes;
+    return 0;
+}
+
+void btck_chainstate_manager_options_update_prune_lock(btck_ChainstateManagerOptions* chainman_opts, const char* name, size_t name_len, int32_t height)
+{
+    assert(name != nullptr || name_len == 0);
+    auto& opts{btck_ChainstateManagerOptions::get(chainman_opts)};
+    LOCK(opts.m_mutex);
+    opts.m_prune_locks[std::string{name, name_len}] = {.height_first = height};
+}
+
+// Exported for test_kernel only and not declared in bitcoinkernel.h
+extern "C" BITCOINKERNEL_API void btck_chainstate_manager_options_update_fast_prune_for_testing(
+    btck_ChainstateManagerOptions* chainman_opts,
+    int fast_prune)
+{
+    auto& opts{btck_ChainstateManagerOptions::get(chainman_opts)};
+    LOCK(opts.m_mutex);
+    opts.m_blockman_options.fast_prune = fast_prune == 1;
+}
+
 btck_ChainstateManager* btck_chainstate_manager_create(
     const btck_ChainstateManagerOptions* chainman_opts)
 {
     auto& opts{btck_ChainstateManagerOptions::get(chainman_opts)};
+    std::unique_ptr<node::BlockManager> blockman;
     std::unique_ptr<ChainstateManager> chainman;
     try {
         LOCK(opts.m_mutex);
-        chainman = std::make_unique<ChainstateManager>(*opts.m_context->m_interrupt, opts.m_chainman_options, opts.m_blockman_options);
+        auto blockman_options{opts.m_blockman_options};
+        if (blockman_options.prune_target != 0 && opts.m_prune_target_bytes != 0) {
+            blockman_options.prune_target = opts.m_prune_target_bytes;
+        }
+        blockman = std::make_unique<node::BlockManager>(*opts.m_context->m_interrupt, blockman_options);
+        {
+            LOCK(::cs_main);
+            for (const auto& [name, lock_info] : opts.m_prune_locks) blockman->UpdatePruneLock(name, lock_info);
+        }
+        chainman = std::make_unique<ChainstateManager>(*opts.m_context->m_interrupt, opts.m_chainman_options, *blockman);
     } catch (const std::exception& e) {
         LogError("Failed to create chainstate manager: %s", e.what());
         return nullptr;
@@ -1156,7 +1211,7 @@ btck_ChainstateManager* btck_chainstate_manager_create(
         return nullptr;
     }
 
-    return btck_ChainstateManager::create(std::move(chainman), opts.m_context);
+    return btck_ChainstateManager::create(std::move(blockman), std::move(chainman), opts.m_context);
 }
 
 const btck_BlockTreeEntry* btck_chainstate_manager_get_block_tree_entry_by_hash(const btck_ChainstateManager* chainman, const btck_BlockHash* block_hash)
@@ -1168,6 +1223,15 @@ const btck_BlockTreeEntry* btck_chainstate_manager_get_block_tree_entry_by_hash(
         return nullptr;
     }
     return btck_BlockTreeEntry::ref(block_index);
+}
+
+const btck_BlockTreeEntry* btck_chainstate_manager_get_first_available_entry(const btck_ChainstateManager* chainstate_manager)
+{
+    auto& chainman = *btck_ChainstateManager::get(chainstate_manager).m_chainman;
+    LOCK(chainman.GetMutex());
+    const CChain& chain{chainman.ActiveChain()};
+    const auto prune_height{node::GetPruneHeight(chainman.m_blockman, chain)};
+    return btck_BlockTreeEntry::ref(chain[prune_height ? *prune_height + 1 : 0]);
 }
 
 const btck_BlockTreeEntry* btck_chainstate_manager_get_best_entry(const btck_ChainstateManager* chainstate_manager)
@@ -1284,10 +1348,10 @@ void btck_block_destroy(btck_Block* block)
     delete block;
 }
 
-btck_Block* btck_block_read(const btck_ChainstateManager* chainman, const btck_BlockTreeEntry* entry)
+btck_Block* btck_block_read(const btck_BlockManager* block_manager, const btck_BlockTreeEntry* entry)
 {
     auto block{std::make_shared<CBlock>()};
-    if (!btck_ChainstateManager::get(chainman).m_chainman->m_blockman.ReadBlock(*block, btck_BlockTreeEntry::get(entry))) {
+    if (!btck_BlockManager::get(block_manager).m_blockman->ReadBlock(*block, btck_BlockTreeEntry::get(entry))) {
         LogError("Failed to read block.");
         return nullptr;
     }
@@ -1339,14 +1403,14 @@ void btck_block_hash_destroy(btck_BlockHash* hash)
     delete hash;
 }
 
-btck_BlockSpentOutputs* btck_block_spent_outputs_read(const btck_ChainstateManager* chainman, const btck_BlockTreeEntry* entry)
+btck_BlockSpentOutputs* btck_block_spent_outputs_read(const btck_BlockManager* block_manager, const btck_BlockTreeEntry* entry)
 {
     auto block_undo{std::make_shared<CBlockUndo>()};
     if (btck_BlockTreeEntry::get(entry).nHeight < 1) {
         LogDebug(BCLog::KERNEL, "The genesis block does not have any spent outputs.");
         return btck_BlockSpentOutputs::create(block_undo);
     }
-    if (!btck_ChainstateManager::get(chainman).m_chainman->m_blockman.ReadBlockUndo(*block_undo, btck_BlockTreeEntry::get(entry))) {
+    if (!btck_BlockManager::get(block_manager).m_blockman->ReadBlockUndo(*block_undo, btck_BlockTreeEntry::get(entry))) {
         LogError("Failed to read block spent outputs data.");
         return nullptr;
     }
@@ -1455,6 +1519,44 @@ btck_BlockValidationState* btck_chainstate_manager_process_block_header(
 const btck_Chain* btck_chainstate_manager_get_active_chain(const btck_ChainstateManager* chainman)
 {
     return btck_Chain::ref(&WITH_LOCK(btck_ChainstateManager::get(chainman).m_chainman->GetMutex(), return btck_ChainstateManager::get(chainman).m_chainman->ActiveChain()));
+}
+
+btck_BlockManager* btck_chainstate_manager_get_block_manager(btck_ChainstateManager* chainstate_manager)
+{
+    return btck_BlockManager::ref(&btck_ChainstateManager::get(chainstate_manager));
+}
+
+int btck_block_manager_prune_up_to_height(btck_BlockManager* block_manager, int32_t height)
+{
+    if (!btck_BlockManager::get(block_manager).m_blockman->IsPruneMode()) {
+        LogError("Failed to prune: pruning is not enabled.");
+        return -1;
+    }
+    // FlushStateToDisk ignores a manual prune height below 1 and may prune automatically instead
+    if (height < 1) return 0;
+
+    auto& chainman{*btck_BlockManager::get(block_manager).m_chainman};
+    LOCK(chainman.GetMutex());
+    BlockValidationState state;
+    if (!chainman.ActiveChainstate().FlushStateToDisk(state, FlushStateMode::NONE, height)) {
+        LogError("Failed to prune: %s", state.ToString());
+        return -1;
+    }
+    return 0;
+}
+
+void btck_block_manager_update_prune_lock(btck_BlockManager* block_manager, const char* name, size_t name_len, int32_t height)
+{
+    assert(name != nullptr || name_len == 0);
+    LOCK(::cs_main);
+    btck_BlockManager::get(block_manager).m_blockman->UpdatePruneLock(std::string{name, name_len}, {.height_first = height});
+}
+
+int btck_block_manager_delete_prune_lock(btck_BlockManager* block_manager, const char* name, size_t name_len)
+{
+    assert(name != nullptr || name_len == 0);
+    LOCK(::cs_main);
+    return btck_BlockManager::get(block_manager).m_blockman->DeletePruneLock(std::string{name, name_len}) ? 1 : 0;
 }
 
 int32_t btck_chain_get_height(const btck_Chain* chain)

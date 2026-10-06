@@ -227,6 +227,12 @@ typedef struct btck_ChainstateManagerOptions btck_ChainstateManagerOptions;
 typedef struct btck_ChainstateManager btck_ChainstateManager;
 
 /**
+ * Opaque data structure for holding a block manager, which stores blocks and
+ * their spent outputs on disk. It is owned by a chainstate manager.
+ */
+typedef struct btck_BlockManager btck_BlockManager;
+
+/**
  * Opaque data structure for holding a block.
  */
 typedef struct btck_Block btck_Block;
@@ -1284,6 +1290,49 @@ BITCOINKERNEL_API void btck_chainstate_manager_options_update_chainstate_db_in_m
     int chainstate_db_in_memory) BITCOINKERNEL_ARG_NONNULL(1);
 
 /**
+ * @brief Sets pruning in the options. Blocks are then deleted by
+ * @ref btck_block_manager_prune_up_to_height, and automatically if a target is
+ * set with @ref btck_chainstate_manager_options_set_prune_target_bytes. Once
+ * blocks have been deleted, the data directory only opens with pruning set.
+ *
+ * @param[in] chainstate_manager_options Non-null, created by @ref btck_chainstate_manager_options_create.
+ * @param[in] prune                      Set pruning.
+ */
+BITCOINKERNEL_API void btck_chainstate_manager_options_update_prune(
+    btck_ChainstateManagerOptions* chainstate_manager_options,
+    int prune) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Set a target size for the blocks and spent outputs kept on disk. With
+ * pruning set, older blocks are then also deleted automatically to stay below
+ * it. The 288 most recent blocks and blocks kept by prune locks are never
+ * deleted and can keep the size above the target.
+ *
+ * @param[in] chainstate_manager_options Non-null, options to be set.
+ * @param[in] prune_target_bytes         The target size in bytes, or 0 for no automatic pruning.
+ *                                       Other values below 550 MiB are rejected.
+ * @return                               0 if the set was successful, non-zero if the set failed.
+ */
+BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_options_set_prune_target_bytes(
+    btck_ChainstateManagerOptions* chainstate_manager_options,
+    uint64_t prune_target_bytes) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Sets a prune lock that is in place before the chainstate manager
+ * loads, since loading can already prune automatically. The lock can be
+ * changed later with @ref btck_block_manager_update_prune_lock.
+ *
+ * @param[in] chainstate_manager_options Non-null, created by @ref btck_chainstate_manager_options_create.
+ * @param[in] name                       Identifies the lock.
+ * @param[in] name_len                   Length of name.
+ * @param[in] height                     The lowest height to keep.
+ */
+BITCOINKERNEL_API void btck_chainstate_manager_options_update_prune_lock(
+    btck_ChainstateManagerOptions* chainstate_manager_options,
+    const char* name, size_t name_len,
+    int32_t height) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
  * Destroy the chainstate manager options.
  */
 BITCOINKERNEL_API void btck_chainstate_manager_options_destroy(btck_ChainstateManagerOptions* chainstate_manager_options);
@@ -1383,6 +1432,17 @@ BITCOINKERNEL_API const btck_Chain* btck_chainstate_manager_get_active_chain(
     const btck_ChainstateManager* chainstate_manager) BITCOINKERNEL_ARG_NONNULL(1);
 
 /**
+ * @brief Get the block manager that stores the blocks of a chainstate manager.
+ * It is owned by the chainstate manager and must not be used after the
+ * chainstate manager is destroyed.
+ *
+ * @param[in] chainstate_manager Non-null.
+ * @return                       The block manager.
+ */
+BITCOINKERNEL_API btck_BlockManager* btck_chainstate_manager_get_block_manager(
+    btck_ChainstateManager* chainstate_manager) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
  * @brief Retrieve a block tree entry by its block hash.
  *
  * @param[in] chainstate_manager Non-null.
@@ -1395,9 +1455,69 @@ BITCOINKERNEL_API const btck_BlockTreeEntry* btck_chainstate_manager_get_block_t
     const btck_BlockHash* block_hash) BITCOINKERNEL_ARG_NONNULL(1, 2);
 
 /**
+ * @brief Get the lowest entry of the active chain from which every block up to
+ * the tip can be read together with its spent outputs. This is the genesis
+ * block if nothing has been pruned.
+ *
+ * @param[in] chainstate_manager Non-null.
+ * @return                       The block tree entry, or null if there is none.
+ */
+BITCOINKERNEL_API const btck_BlockTreeEntry* btck_chainstate_manager_get_first_available_entry(
+    const btck_ChainstateManager* chainstate_manager) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
  * Destroy the chainstate manager.
  */
 BITCOINKERNEL_API void btck_chainstate_manager_destroy(btck_ChainstateManager* chainstate_manager);
+
+///@}
+
+/** @name BlockManager
+ * Functions for working with block managers.
+ */
+///@{
+
+/**
+ * @brief Delete the blocks and spent outputs up to and including the given
+ * height, except the 288 most recent. Some blocks at or below the height may
+ * be kept, because block files are deleted whole and prune locks still apply.
+ * Heights below 1 delete nothing.
+ *
+ * @param[in] block_manager Non-null.
+ * @param[in] height        The highest height to delete.
+ * @return                  0 on success, non-zero if pruning is not enabled or
+ *                          writing to disk failed.
+ */
+BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_block_manager_prune_up_to_height(
+    btck_BlockManager* block_manager,
+    int32_t height) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Keep the blocks at and above a height, with their spent outputs,
+ * from being pruned until the lock is updated or deleted. Locks are kept in
+ * memory only and must be set again after a restart.
+ *
+ * @param[in] block_manager Non-null.
+ * @param[in] name          Identifies the lock.
+ * @param[in] name_len      Length of name.
+ * @param[in] height        The lowest height to keep.
+ */
+BITCOINKERNEL_API void btck_block_manager_update_prune_lock(
+    btck_BlockManager* block_manager,
+    const char* name, size_t name_len,
+    int32_t height) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Delete a lock set with @ref btck_block_manager_update_prune_lock.
+ *
+ * @param[in] block_manager Non-null.
+ * @param[in] name          Identifies the lock.
+ * @param[in] name_len      Length of name.
+ * @return                  1 if the lock existed, 0 otherwise.
+ */
+BITCOINKERNEL_API int btck_block_manager_delete_prune_lock(
+    btck_BlockManager* block_manager,
+    const char* name, size_t name_len) BITCOINKERNEL_ARG_NONNULL(1);
 
 ///@}
 
@@ -1410,12 +1530,12 @@ BITCOINKERNEL_API void btck_chainstate_manager_destroy(btck_ChainstateManager* c
  * @brief Reads the block the passed in block tree entry points to from disk and
  * returns it.
  *
- * @param[in] chainstate_manager Non-null.
- * @param[in] block_tree_entry   Non-null.
- * @return                       The read out block, or null on error.
+ * @param[in] block_manager    Non-null.
+ * @param[in] block_tree_entry Non-null.
+ * @return                     The read out block, or null on error.
  */
 BITCOINKERNEL_API btck_Block* BITCOINKERNEL_WARN_UNUSED_RESULT btck_block_read(
-    const btck_ChainstateManager* chainstate_manager,
+    const btck_BlockManager* block_manager,
     const btck_BlockTreeEntry* block_tree_entry) BITCOINKERNEL_ARG_NONNULL(1, 2);
 
 /**
@@ -1624,12 +1744,12 @@ BITCOINKERNEL_API int btck_chain_contains(
  * @brief Reads the block spent coins data the passed in block tree entry points to from
  * disk and returns it.
  *
- * @param[in] chainstate_manager Non-null.
- * @param[in] block_tree_entry   Non-null.
- * @return                       The read out block spent outputs, or null on error.
+ * @param[in] block_manager    Non-null.
+ * @param[in] block_tree_entry Non-null.
+ * @return                     The read out block spent outputs, or null on error.
  */
 BITCOINKERNEL_API btck_BlockSpentOutputs* BITCOINKERNEL_WARN_UNUSED_RESULT btck_block_spent_outputs_read(
-    const btck_ChainstateManager* chainstate_manager,
+    const btck_BlockManager* block_manager,
     const btck_BlockTreeEntry* block_tree_entry) BITCOINKERNEL_ARG_NONNULL(1, 2);
 
 /**
