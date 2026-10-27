@@ -424,6 +424,9 @@ public:
 
     [[nodiscard]] bool LoadingBlocks() const { return m_importing || !m_blockfiles_indexed; }
 
+    /** Record on disk that reindexing finished. */
+    void SetBlockfilesIndexed() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Calculate the amount of disk space the block & undo files currently use */
     uint64_t CalculateCurrentUsage() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
