@@ -197,6 +197,11 @@ enum class ReadRawError {
     BadPartRange,
 };
 
+enum class WriteBlockStorageError {
+    LowDiskSpace,
+    FlushFailed,
+};
+
 /**
  * Maintains a tree of blocks (stored in `m_block_index`) which is consulted
  * to determine where the most-work tip is.
@@ -344,11 +349,12 @@ public:
 
     void WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
-     * Flush the block and undo file used for `tip_height`, write the block
-     * index, then delete `files_to_prune`. Returns false, without writing the
-     * index or deleting files, if the flush fails.
+     * Check the blocks directory has space, flush the block and undo file used
+     * for `tip_height`, write the block index, then delete `files_to_prune`.
+     * Fails, without writing the index or deleting files, if space is low or
+     * the flush fails.
      */
-    [[nodiscard]] bool WriteBlockStorage(int tip_height, const std::set<int>& files_to_prune) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] util::Expected<void, WriteBlockStorageError> WriteBlockStorage(int tip_height, const std::set<int>& files_to_prune) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
@@ -469,6 +475,16 @@ public:
 
     //! Return the last height that can be pruned, limited by `last_prune` and the prune locks.
     int GetLastPrunableHeight(int last_prune) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    //! Return the last height a manual prune may reach, limited by `tip_height` and the prune
+    //! locks, or nullopt while pruning is off or the block files are not indexed yet.
+    std::optional<int> BeginManualPrune(int tip_height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    //! Same as BeginManualPrune(), but only once a prune check was requested, which this clears.
+    std::optional<int> BeginTargetPrune(int tip_height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    //! Record on disk that block files have been pruned, if not done yet.
+    void SetHavePruned() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     void MovePruneLocksBack(int max_height_first) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
